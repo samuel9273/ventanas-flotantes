@@ -1,0 +1,855 @@
+name: Compilar APK
+
+# Este archivo contiene TODO el proyecto: al guardarlo en GitHub, se compila solo
+# y el APK aparece en la seccion "Releases" del repositorio.
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  compilar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Crear los archivos del proyecto
+        run: |
+          mkdir -p proyecto
+          cd proyecto
+          cat > settings.gradle <<'FIN_DEL_ARCHIVO'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "VentanasFlotantes"
+          include ':app'
+          FIN_DEL_ARCHIVO
+          cat > build.gradle <<'FIN_DEL_ARCHIVO'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          FIN_DEL_ARCHIVO
+          cat > gradle.properties <<'FIN_DEL_ARCHIVO'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          android.nonTransitiveRClass=true
+          FIN_DEL_ARCHIVO
+          mkdir -p app
+          cat > app/build.gradle <<'FIN_DEL_ARCHIVO'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.flotante.app'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.flotante.app'
+                  minSdk 26
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          FIN_DEL_ARCHIVO
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'FIN_DEL_ARCHIVO'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+              </queries>
+
+              <application
+                  android:allowBackup="false"
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:label="Ventanas Flotantes"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+                  android:usesCleartextTraffic="true">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".FloatingService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="ventanas_flotantes" />
+                  </service>
+              </application>
+          </manifest>
+          FIN_DEL_ARCHIVO
+          mkdir -p app/src/main/java/com/flotante/app
+          cat > app/src/main/java/com/flotante/app/MainActivity.java <<'FIN_DEL_ARCHIVO'
+          package com.flotante.app;
+
+          import android.app.Activity;
+          import android.app.ActivityOptions;
+          import android.app.AlertDialog;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.content.pm.ResolveInfo;
+          import android.graphics.Rect;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.util.DisplayMetrics;
+          import android.util.TypedValue;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.List;
+
+          public class MainActivity extends Activity {
+
+              private TextView estado;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  ScrollView scroll = new ScrollView(this);
+                  LinearLayout col = new LinearLayout(this);
+                  col.setOrientation(LinearLayout.VERTICAL);
+                  col.setPadding(dp(20), dp(24), dp(20), dp(32));
+                  scroll.addView(col, new ViewGroup.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  agregar(col, texto("Ventanas flotantes", 26, true), 0);
+                  agregar(col, texto("Abre mini-ventanas que flotan sobre cualquier app. "
+                          + "Las puedes mover, cambiar de tamaño, hacer transparentes y minimizar.", 14, false), 8);
+                  estado = texto("", 15, true);
+                  agregar(col, estado, 16);
+
+                  agregar(col, boton("1. Dar permiso de superposición", x -> pedirPermiso()), 12);
+                  agregar(col, boton("2. Abrir navegador flotante", x -> abrir(FloatingService.ACCION_NAVEGADOR)), 8);
+                  agregar(col, boton("Abrir notas flotantes", x -> abrir(FloatingService.ACCION_NOTAS)), 8);
+                  agregar(col, boton("Cerrar todas las ventanas", x -> cerrarTodo()), 8);
+
+                  agregar(col, texto("Apps en ventana (experimental)", 18, true), 28);
+                  agregar(col, texto("Abre cualquier app instalada en una ventana flotante. "
+                          + "Solo funciona si tu teléfono tiene activado el modo de ventanas libres: "
+                          + "en Opciones de desarrollador activa \"Activar ventanas de forma libre\" "
+                          + "y \"Forzar que las actividades sean redimensionables\", y reinicia el teléfono. "
+                          + "Si no existen esas opciones, la app se abrirá a pantalla completa.", 13, false), 6);
+                  agregar(col, boton("Abrir una app en ventana…", x -> elegirApp()), 10);
+                  agregar(col, boton("Ir a Opciones de desarrollador", x -> abrirOpcionesDesarrollador()), 8);
+
+                  setContentView(scroll);
+
+                  if (Build.VERSION.SDK_INT >= 33
+                          && checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                          != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1);
+                  }
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  if (Settings.canDrawOverlays(this)) {
+                      estado.setText("Permiso de superposición: concedido");
+                      estado.setTextColor(0xFF66BB6A);
+                  } else {
+                      estado.setText("Permiso de superposición: FALTA (toca el botón 1)");
+                      estado.setTextColor(0xFFEF5350);
+                  }
+              }
+
+              // ---------------------------------------------------------------- acciones
+
+              private void pedirPermiso() {
+                  Intent i = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                          Uri.parse("package:" + getPackageName()));
+                  startActivity(i);
+              }
+
+              private void abrir(String accion) {
+                  if (!Settings.canDrawOverlays(this)) {
+                      Toast.makeText(this, "Primero da el permiso de superposición", Toast.LENGTH_LONG).show();
+                      pedirPermiso();
+                      return;
+                  }
+                  Intent i = new Intent(this, FloatingService.class).setAction(accion);
+                  startForegroundService(i);
+              }
+
+              private void cerrarTodo() {
+                  Intent i = new Intent(this, FloatingService.class).setAction(FloatingService.ACCION_CERRAR);
+                  startService(i);
+              }
+
+              private void abrirOpcionesDesarrollador() {
+                  try {
+                      startActivity(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS));
+                  } catch (Exception e) {
+                      Toast.makeText(this,
+                              "Actívalas en Ajustes > Acerca del teléfono > toca 7 veces \"Número de compilación\"",
+                              Toast.LENGTH_LONG).show();
+                  }
+              }
+
+              private void elegirApp() {
+                  PackageManager pm = getPackageManager();
+                  Intent principal = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+                  List<ResolveInfo> lista = pm.queryIntentActivities(principal, 0);
+                  Collections.sort(lista, new ResolveInfo.DisplayNameComparator(pm));
+
+                  final List<String> paquetes = new ArrayList<>();
+                  final List<String> nombres = new ArrayList<>();
+                  for (ResolveInfo ri : lista) {
+                      if (ri.activityInfo.packageName.equals(getPackageName())) {
+                          continue;
+                      }
+                      paquetes.add(ri.activityInfo.packageName);
+                      nombres.add(String.valueOf(ri.loadLabel(pm)));
+                  }
+
+                  new AlertDialog.Builder(this)
+                          .setTitle("Elige la app")
+                          .setItems(nombres.toArray(new String[0]),
+                                  (dialogo, cual) -> abrirEnVentana(paquetes.get(cual)))
+                          .show();
+              }
+
+              private void abrirEnVentana(String paquete) {
+                  Intent i = getPackageManager().getLaunchIntentForPackage(paquete);
+                  if (i == null) {
+                      Toast.makeText(this, "No se pudo abrir esa app", Toast.LENGTH_SHORT).show();
+                      return;
+                  }
+                  i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+
+                  DisplayMetrics dm = getResources().getDisplayMetrics();
+                  Rect limites = new Rect(dm.widthPixels / 12, dm.heightPixels / 8,
+                          dm.widthPixels * 11 / 12, dm.heightPixels * 5 / 8);
+                  ActivityOptions opciones = ActivityOptions.makeBasic();
+                  opciones.setLaunchBounds(limites);
+                  try {
+                      // 5 = modo "ventana libre". Puede estar bloqueado por el sistema; si falla, no pasa nada.
+                      ActivityOptions.class.getMethod("setLaunchWindowingMode", int.class).invoke(opciones, 5);
+                  } catch (Throwable ignorada) {
+                      // se usa solo setLaunchBounds
+                  }
+
+                  try {
+                      startActivity(i, opciones.toBundle());
+                      Toast.makeText(this,
+                              "Si se abrió a pantalla completa, tu teléfono no tiene ventanas libres activadas",
+                              Toast.LENGTH_LONG).show();
+                  } catch (Exception e) {
+                      Toast.makeText(this, "No se pudo abrir: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                  }
+              }
+
+              // ---------------------------------------------------------------- utilidades de interfaz
+
+              private int dp(float valor) {
+                  return (int) (valor * getResources().getDisplayMetrics().density + 0.5f);
+              }
+
+              private TextView texto(String contenido, float sp, boolean negrita) {
+                  TextView t = new TextView(this);
+                  t.setText(contenido);
+                  t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+                  if (negrita) {
+                      t.setTypeface(t.getTypeface(), android.graphics.Typeface.BOLD);
+                  }
+                  return t;
+              }
+
+              private Button boton(String contenido, View.OnClickListener accion) {
+                  Button b = new Button(this);
+                  b.setText(contenido);
+                  b.setAllCaps(false);
+                  b.setOnClickListener(accion);
+                  return b;
+              }
+
+              private void agregar(LinearLayout col, View vista, int margenSuperiorDp) {
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  lp.topMargin = dp(margenSuperiorDp);
+                  col.addView(vista, lp);
+              }
+          }
+          FIN_DEL_ARCHIVO
+          mkdir -p app/src/main/java/com/flotante/app
+          cat > app/src/main/java/com/flotante/app/FloatingService.java <<'FIN_DEL_ARCHIVO'
+          package com.flotante.app;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.pm.ServiceInfo;
+          import android.graphics.PixelFormat;
+          import android.graphics.drawable.GradientDrawable;
+          import android.graphics.drawable.Icon;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.IBinder;
+          import android.provider.Settings;
+          import android.text.Editable;
+          import android.text.InputType;
+          import android.text.TextWatcher;
+          import android.util.DisplayMetrics;
+          import android.util.TypedValue;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.view.WindowManager;
+          import android.view.inputmethod.EditorInfo;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.util.ArrayList;
+          import java.util.List;
+
+          /**
+           * Servicio que dibuja ventanas flotantes (navegador y notas) encima de cualquier app.
+           * Cada ventana se puede mover (arrastrando la barra de arriba), cambiar de tamaño
+           * (arrastrando la barra de abajo), hacer transparente, minimizar y cerrar.
+           */
+          public class FloatingService extends Service {
+
+              public static final String ACCION_NAVEGADOR = "com.flotante.app.NAVEGADOR";
+              public static final String ACCION_NOTAS = "com.flotante.app.NOTAS";
+              public static final String ACCION_CERRAR = "com.flotante.app.CERRAR";
+
+              private static final String CANAL = "ventanas_flotantes";
+              private static final int ID_NOTIFICACION = 1;
+              private static final int MATCH = ViewGroup.LayoutParams.MATCH_PARENT;
+
+              private WindowManager wm;
+              private final List<Ventana> ventanas = new ArrayList<>();
+              private int creadas = 0;
+
+              @Override
+              public IBinder onBind(Intent intent) {
+                  return null;
+              }
+
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+                  wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+              }
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  iniciarPrimerPlano();
+                  String accion = intent != null ? intent.getAction() : null;
+
+                  if (ACCION_CERRAR.equals(accion)) {
+                      cerrarTodas();
+                      stopForeground(STOP_FOREGROUND_REMOVE);
+                      stopSelf();
+                      return START_NOT_STICKY;
+                  }
+                  if (ACCION_NAVEGADOR.equals(accion)) {
+                      crearVentana(true);
+                  } else if (ACCION_NOTAS.equals(accion)) {
+                      crearVentana(false);
+                  } else if (ventanas.isEmpty()) {
+                      stopForeground(STOP_FOREGROUND_REMOVE);
+                      stopSelf();
+                  }
+                  return START_NOT_STICKY;
+              }
+
+              @Override
+              public void onDestroy() {
+                  cerrarTodas();
+                  super.onDestroy();
+              }
+
+              // ---------------------------------------------------------------- notificación
+
+              private void iniciarPrimerPlano() {
+                  NotificationManager nm = getSystemService(NotificationManager.class);
+                  nm.createNotificationChannel(new NotificationChannel(
+                          CANAL, "Ventanas flotantes", NotificationManager.IMPORTANCE_LOW));
+
+                  Intent abrir = new Intent(this, MainActivity.class);
+                  PendingIntent piAbrir = PendingIntent.getActivity(this, 0, abrir,
+                          PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+
+                  Intent cerrar = new Intent(this, FloatingService.class).setAction(ACCION_CERRAR);
+                  PendingIntent piCerrar = PendingIntent.getService(this, 1, cerrar,
+                          PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+
+                  Notification.Action cerrarTodo = new Notification.Action.Builder(
+                          Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel),
+                          "Cerrar todo", piCerrar).build();
+
+                  Notification n = new Notification.Builder(this, CANAL)
+                          .setContentTitle("Ventanas flotantes activas")
+                          .setContentText("Toca para abrir la app")
+                          .setSmallIcon(android.R.drawable.ic_dialog_info)
+                          .setContentIntent(piAbrir)
+                          .addAction(cerrarTodo)
+                          .setOngoing(true)
+                          .build();
+
+                  if (Build.VERSION.SDK_INT >= 34) {
+                      startForeground(ID_NOTIFICACION, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+                  } else {
+                      startForeground(ID_NOTIFICACION, n);
+                  }
+              }
+
+              // ---------------------------------------------------------------- manejo de ventanas
+
+              private void crearVentana(boolean navegador) {
+                  if (!Settings.canDrawOverlays(this)) {
+                      Toast.makeText(this, "Falta el permiso de superposición", Toast.LENGTH_LONG).show();
+                      terminarSiVacio();
+                      return;
+                  }
+                  if (!navegador) {
+                      for (Ventana existente : ventanas) {
+                          if (existente.esNotas) {
+                              Toast.makeText(this, "Ya tienes una ventana de notas abierta", Toast.LENGTH_SHORT).show();
+                              return;
+                          }
+                      }
+                  }
+                  Ventana nueva = new Ventana(navegador, creadas++);
+                  try {
+                      wm.addView(nueva.raiz, nueva.lp);
+                      ventanas.add(nueva);
+                  } catch (Exception e) {
+                      Toast.makeText(this, "No se pudo abrir la ventana: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                      nueva.liberar();
+                      terminarSiVacio();
+                  }
+              }
+
+              private void terminarSiVacio() {
+                  if (ventanas.isEmpty()) {
+                      stopForeground(STOP_FOREGROUND_REMOVE);
+                      stopSelf();
+                  }
+              }
+
+              private void cerrarTodas() {
+                  for (Ventana v : new ArrayList<>(ventanas)) {
+                      v.quitar();
+                  }
+                  ventanas.clear();
+              }
+
+              // ---------------------------------------------------------------- utilidades
+
+              private int dp(float valor) {
+                  return (int) (valor * getResources().getDisplayMetrics().density + 0.5f);
+              }
+
+              private static int limitar(int valor, int min, int max) {
+                  return Math.max(min, Math.min(max, valor));
+              }
+
+              private static String normalizar(String texto) {
+                  String t = texto == null ? "" : texto.trim();
+                  if (t.isEmpty()) {
+                      return "https://www.google.com";
+                  }
+                  if (t.startsWith("http://") || t.startsWith("https://")) {
+                      return t;
+                  }
+                  if (t.contains(" ") || !t.contains(".")) {
+                      return "https://www.google.com/search?q=" + Uri.encode(t);
+                  }
+                  return "https://" + t;
+              }
+
+              // ---------------------------------------------------------------- una ventana flotante
+
+              private class Ventana {
+                  LinearLayout raiz;
+                  LinearLayout cuerpo;
+                  WindowManager.LayoutParams lp;
+                  TextView botonMinimizar;
+                  WebView web;
+                  EditText campoUrl;
+                  boolean esNotas;
+                  boolean minimizada = false;
+                  int altoGuardado;
+                  int anchoGuardado;
+                  int nivelAlpha = 0;
+                  final float[] niveles = {1f, 0.75f, 0.5f};
+
+                  Ventana(boolean navegador, int indice) {
+                      esNotas = !navegador;
+                      DisplayMetrics dm = getResources().getDisplayMetrics();
+                      int ancho = (int) (dm.widthPixels * (navegador ? 0.92f : 0.8f));
+                      int alto = (int) (dm.heightPixels * (navegador ? 0.55f : 0.38f));
+                      altoGuardado = alto;
+                      anchoGuardado = ancho;
+
+                      lp = new WindowManager.LayoutParams(
+                              ancho, alto,
+                              WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                              WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                                      | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                              PixelFormat.TRANSLUCENT);
+                      lp.gravity = Gravity.TOP | Gravity.START;
+                      lp.x = (dm.widthPixels - ancho) / 2 + dp(12) * (indice % 5);
+                      lp.y = dp(70) + dp(36) * (indice % 5);
+                      lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN;
+
+                      raiz = new LinearLayout(FloatingService.this);
+                      raiz.setOrientation(LinearLayout.VERTICAL);
+                      GradientDrawable fondo = new GradientDrawable();
+                      fondo.setColor(0xFF222222);
+                      fondo.setCornerRadius(dp(10));
+                      fondo.setStroke(dp(1), 0xFF666666);
+                      raiz.setBackground(fondo);
+                      raiz.setClipToOutline(true);
+
+                      raiz.addView(crearBarraTitulo(navegador ? "Navegador" : "Notas"),
+                              new LinearLayout.LayoutParams(MATCH, dp(40)));
+
+                      cuerpo = new LinearLayout(FloatingService.this);
+                      cuerpo.setOrientation(LinearLayout.VERTICAL);
+                      cuerpo.addView(navegador ? crearNavegador() : crearNotas(),
+                              new LinearLayout.LayoutParams(MATCH, 0, 1f));
+                      cuerpo.addView(crearAgarre(), new LinearLayout.LayoutParams(MATCH, dp(26)));
+                      raiz.addView(cuerpo, new LinearLayout.LayoutParams(MATCH, 0, 1f));
+                  }
+
+                  // ---- barra de arriba: arrastrar, transparencia, minimizar, cerrar
+                  private View crearBarraTitulo(String texto) {
+                      LinearLayout barra = new LinearLayout(FloatingService.this);
+                      barra.setOrientation(LinearLayout.HORIZONTAL);
+                      barra.setGravity(Gravity.CENTER_VERTICAL);
+                      barra.setBackgroundColor(0xFF37474F);
+
+                      TextView titulo = new TextView(FloatingService.this);
+                      titulo.setText(texto + "  (arrastra aquí)");
+                      titulo.setTextColor(0xFFFFFFFF);
+                      titulo.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+                      titulo.setSingleLine(true);
+                      titulo.setGravity(Gravity.CENTER_VERTICAL);
+                      titulo.setPadding(dp(12), 0, dp(8), 0);
+                      titulo.setOnTouchListener(new View.OnTouchListener() {
+                          int x0, y0;
+                          float tx, ty;
+
+                          @Override
+                          public boolean onTouch(View vista, MotionEvent e) {
+                              switch (e.getActionMasked()) {
+                                  case MotionEvent.ACTION_DOWN: {
+                                      x0 = lp.x;
+                                      y0 = lp.y;
+                                      tx = e.getRawX();
+                                      ty = e.getRawY();
+                                      return true;
+                                  }
+                                  case MotionEvent.ACTION_MOVE: {
+                                      DisplayMetrics d = getResources().getDisplayMetrics();
+                                      lp.x = limitar(x0 + (int) (e.getRawX() - tx), -lp.width + dp(80), d.widthPixels - dp(80));
+                                      lp.y = limitar(y0 + (int) (e.getRawY() - ty), 0, d.heightPixels - dp(60));
+                                      actualizar();
+                                      return true;
+                                  }
+                                  default:
+                                      return true;
+                              }
+                          }
+                      });
+                      barra.addView(titulo, new LinearLayout.LayoutParams(0, MATCH, 1f));
+
+                      barra.addView(botonBarra("◐", x -> cambiarAlpha()), new LinearLayout.LayoutParams(dp(42), MATCH));
+                      botonMinimizar = botonBarra("−", x -> alternarMinimizar());
+                      barra.addView(botonMinimizar, new LinearLayout.LayoutParams(dp(42), MATCH));
+                      barra.addView(botonBarra("×", x -> cerrar()), new LinearLayout.LayoutParams(dp(42), MATCH));
+                      return barra;
+                  }
+
+                  private TextView botonBarra(String texto, View.OnClickListener accion) {
+                      TextView t = new TextView(FloatingService.this);
+                      t.setText(texto);
+                      t.setTextColor(0xFFFFFFFF);
+                      t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+                      t.setGravity(Gravity.CENTER);
+                      t.setOnClickListener(accion);
+                      return t;
+                  }
+
+                  // ---- barra de abajo: cambiar tamaño
+                  private View crearAgarre() {
+                      TextView agarre = new TextView(FloatingService.this);
+                      agarre.setText("≡  arrastra para cambiar el tamaño  ≡");
+                      agarre.setTextColor(0xFFCCCCCC);
+                      agarre.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
+                      agarre.setGravity(Gravity.CENTER);
+                      agarre.setBackgroundColor(0xFF37474F);
+                      agarre.setOnTouchListener(new View.OnTouchListener() {
+                          int w0, h0;
+                          float tx, ty;
+
+                          @Override
+                          public boolean onTouch(View vista, MotionEvent e) {
+                              switch (e.getActionMasked()) {
+                                  case MotionEvent.ACTION_DOWN: {
+                                      w0 = lp.width;
+                                      h0 = lp.height;
+                                      tx = e.getRawX();
+                                      ty = e.getRawY();
+                                      return true;
+                                  }
+                                  case MotionEvent.ACTION_MOVE: {
+                                      DisplayMetrics d = getResources().getDisplayMetrics();
+                                      lp.width = limitar(w0 + (int) (e.getRawX() - tx), dp(200), d.widthPixels);
+                                      lp.height = limitar(h0 + (int) (e.getRawY() - ty), dp(140), d.heightPixels);
+                                      anchoGuardado = lp.width;
+                                      altoGuardado = lp.height;
+                                      actualizar();
+                                      return true;
+                                  }
+                                  default:
+                                      return true;
+                              }
+                          }
+                      });
+                      return agarre;
+                  }
+
+                  // ---- contenido: navegador
+                  private View crearNavegador() {
+                      LinearLayout col = new LinearLayout(FloatingService.this);
+                      col.setOrientation(LinearLayout.VERTICAL);
+
+                      LinearLayout fila = new LinearLayout(FloatingService.this);
+                      fila.setOrientation(LinearLayout.HORIZONTAL);
+                      fila.setGravity(Gravity.CENTER_VERTICAL);
+                      fila.setBackgroundColor(0xFF2B2B2B);
+
+                      TextView atras = botonBarra("←", x -> {
+                          if (web != null && web.canGoBack()) {
+                              web.goBack();
+                          }
+                      });
+                      fila.addView(atras, new LinearLayout.LayoutParams(dp(40), dp(40)));
+
+                      campoUrl = new EditText(FloatingService.this);
+                      campoUrl.setSingleLine(true);
+                      campoUrl.setTextColor(0xFFFFFFFF);
+                      campoUrl.setHintTextColor(0xFF999999);
+                      campoUrl.setHint("Buscar o escribir dirección");
+                      campoUrl.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+                      campoUrl.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+                      campoUrl.setImeOptions(EditorInfo.IME_ACTION_GO);
+                      campoUrl.setOnEditorActionListener((tv, accion, ev) -> {
+                          cargar(campoUrl.getText().toString());
+                          return true;
+                      });
+                      fila.addView(campoUrl, new LinearLayout.LayoutParams(0, dp(40), 1f));
+
+                      TextView ir = botonBarra("Ir", x -> cargar(campoUrl.getText().toString()));
+                      ir.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+                      fila.addView(ir, new LinearLayout.LayoutParams(dp(40), dp(40)));
+
+                      col.addView(fila, new LinearLayout.LayoutParams(MATCH, dp(40)));
+
+                      web = new WebView(FloatingService.this);
+                      WebSettings s = web.getSettings();
+                      s.setJavaScriptEnabled(true);
+                      s.setDomStorageEnabled(true);
+                      s.setMediaPlaybackRequiresUserGesture(false);
+                      s.setUseWideViewPort(true);
+                      s.setLoadWithOverviewMode(true);
+                      web.setWebViewClient(new WebViewClient() {
+                          @Override
+                          public void onPageFinished(WebView view, String url) {
+                              if (campoUrl != null && !campoUrl.hasFocus()) {
+                                  campoUrl.setText(url);
+                              }
+                          }
+                      });
+                      col.addView(web, new LinearLayout.LayoutParams(MATCH, 0, 1f));
+                      web.loadUrl("https://www.google.com");
+                      return col;
+                  }
+
+                  private void cargar(String texto) {
+                      if (web == null) {
+                          return;
+                      }
+                      web.loadUrl(normalizar(texto));
+                      if (campoUrl != null) {
+                          campoUrl.clearFocus();
+                      }
+                  }
+
+                  // ---- contenido: notas (se guardan solas)
+                  private View crearNotas() {
+                      final SharedPreferences prefs = getSharedPreferences("notas", MODE_PRIVATE);
+                      EditText nota = new EditText(FloatingService.this);
+                      nota.setGravity(Gravity.TOP | Gravity.START);
+                      nota.setHint("Escribe tus notas aquí…");
+                      nota.setHintTextColor(0xFF888888);
+                      nota.setTextColor(0xFFFFFFFF);
+                      nota.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+                      nota.setBackgroundColor(0xFF2B2B2B);
+                      nota.setPadding(dp(10), dp(8), dp(10), dp(8));
+                      nota.setInputType(InputType.TYPE_CLASS_TEXT
+                              | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                              | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+                      nota.setText(prefs.getString("texto", ""));
+                      nota.addTextChangedListener(new TextWatcher() {
+                          @Override
+                          public void beforeTextChanged(CharSequence s, int a, int b, int c) {
+                          }
+
+                          @Override
+                          public void onTextChanged(CharSequence s, int a, int b, int c) {
+                          }
+
+                          @Override
+                          public void afterTextChanged(Editable s) {
+                              prefs.edit().putString("texto", s.toString()).apply();
+                          }
+                      });
+                      return nota;
+                  }
+
+                  // ---- acciones de la ventana
+                  void actualizar() {
+                      try {
+                          wm.updateViewLayout(raiz, lp);
+                      } catch (Exception ignorada) {
+                          // la ventana ya no existe
+                      }
+                  }
+
+                  void cambiarAlpha() {
+                      nivelAlpha = (nivelAlpha + 1) % niveles.length;
+                      lp.alpha = niveles[nivelAlpha];
+                      actualizar();
+                  }
+
+                  void alternarMinimizar() {
+                      minimizada = !minimizada;
+                      if (minimizada) {
+                          altoGuardado = lp.height;
+                          anchoGuardado = lp.width;
+                          cuerpo.setVisibility(View.GONE);
+                          lp.height = WindowManager.LayoutParams.WRAP_CONTENT;
+                          lp.width = Math.min(anchoGuardado, dp(240));
+                          botonMinimizar.setText("+");
+                      } else {
+                          cuerpo.setVisibility(View.VISIBLE);
+                          lp.height = altoGuardado;
+                          lp.width = anchoGuardado;
+                          botonMinimizar.setText("−");
+                      }
+                      actualizar();
+                  }
+
+                  void cerrar() {
+                      quitar();
+                      ventanas.remove(this);
+                      terminarSiVacio();
+                  }
+
+                  void quitar() {
+                      try {
+                          wm.removeView(raiz);
+                      } catch (Exception ignorada) {
+                          // ya estaba quitada
+                      }
+                      liberar();
+                  }
+
+                  void liberar() {
+                      if (web != null) {
+                          web.stopLoading();
+                          web.destroy();
+                          web = null;
+                      }
+                  }
+              }
+          }
+          FIN_DEL_ARCHIVO
+
+      - name: Compilar el APK
+        working-directory: proyecto
+        run: gradle assembleDebug --no-daemon
+
+      - name: Publicar el APK en Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.run_number }}
+          name: APK numero ${{ github.run_number }}
+          files: proyecto/app/build/outputs/apk/debug/app-debug.apk
