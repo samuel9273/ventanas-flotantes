@@ -1,0 +1,457 @@
+name: Compilar APK
+
+# Este archivo contiene TODO el proyecto: al guardarlo en GitHub, se compila solo
+# y el APK aparece en la seccion "Releases" del repositorio.
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  compilar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Crear los archivos del proyecto
+        run: |
+          mkdir -p proyecto
+          cd proyecto
+          cat > settings.gradle <<'FIN_DEL_ARCHIVO'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "VentanasFlotantes"
+          include ':app'
+          FIN_DEL_ARCHIVO
+          cat > build.gradle <<'FIN_DEL_ARCHIVO'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          FIN_DEL_ARCHIVO
+          cat > gradle.properties <<'FIN_DEL_ARCHIVO'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          android.nonTransitiveRClass=true
+          FIN_DEL_ARCHIVO
+          mkdir -p app
+          cat > app/build.gradle <<'FIN_DEL_ARCHIVO'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.flotante.app'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.flotante.app'
+                  minSdk 26
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          FIN_DEL_ARCHIVO
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'FIN_DEL_ARCHIVO'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+              </queries>
+
+              <application
+                  android:allowBackup="false"
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:label="Ventanas Flotantes"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+                  android:usesCleartextTraffic="true">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".FloatingService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="ventanas_flotantes" />
+                  </service>
+              </application>
+          </manifest>
+          FIN_DEL_ARCHIVO
+          mkdir -p app/src/main/java/com/flotante/app
+          cat > app/src/main/java/com/flotante/app/MainActivity.java <<'FIN_DEL_ARCHIVO'
+          package com.flotante.app;
+
+          import android.app.Activity;
+          import android.app.ActivityOptions;
+          import android.app.AlertDialog;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.content.pm.ResolveInfo;
+          import android.graphics.Rect;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.util.DisplayMetrics;
+          import android.util.TypedValue;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.List;
+
+          public class MainActivity extends Activity {
+
+              private TextView estado;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  ScrollView scroll = new ScrollView(this);
+                  LinearLayout col = new LinearLayout(this);
+                  col.setOrientation(LinearLayout.VERTICAL);
+                  col.setPadding(dp(20), dp(24), dp(20), dp(32));
+                  scroll.addView(col, new ViewGroup.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  agregar(col, texto("Ventanas flotantes", 26, true), 0);
+                  agregar(col, texto("Abre mini-ventanas que flotan sobre cualquier app. "
+                          + "Las puedes mover, cambiar de tamaño, hacer transparentes y minimizar.", 14, false), 8);
+                  estado = texto("", 15, true);
+                  agregar(col, estado, 16);
+
+                  agregar(col, boton("1. Dar permiso de superposición", x -> pedirPermiso()), 12);
+                  agregar(col, boton("2. Abrir navegador flotante", x -> abrir(FloatingService.ACCION_NAVEGADOR)), 8);
+                  agregar(col, boton("Abrir notas flotantes", x -> abrir(FloatingService.ACCION_NOTAS)), 8);
+                  agregar(col, boton("Cerrar todas las ventanas", x -> cerrarTodo()), 8);
+
+                  agregar(col, texto("Apps en ventana (experimental)", 18, true), 28);
+                  agregar(col, texto("Abre cualquier app instalada en una ventana flotante. "
+                          + "Solo funciona si tu teléfono tiene activado el modo de ventanas libres: "
+                          + "en Opciones de desarrollador activa \"Activar ventanas de forma libre\" "
+                          + "y \"Forzar que las actividades sean redimensionables\", y reinicia el teléfono. "
+                          + "Si no existen esas opciones, la app se abrirá a pantalla completa.", 13, false), 6);
+                  agregar(col, boton("Abrir una app en ventana…", x -> elegirApp()), 10);
+                  agregar(col, boton("Ir a Opciones de desarrollador", x -> abrirOpcionesDesarrollador()), 8);
+
+                  setContentView(scroll);
+
+                  if (Build.VERSION.SDK_INT >= 33
+                          && checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                          != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1);
+                  }
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  if (Settings.canDrawOverlays(this)) {
+                      estado.setText("Permiso de superposición: concedido");
+                      estado.setTextColor(0xFF66BB6A);
+                  } else {
+                      estado.setText("Permiso de superposición: FALTA (toca el botón 1)");
+                      estado.setTextColor(0xFFEF5350);
+                  }
+              }
+
+              // ---------------------------------------------------------------- acciones
+
+              private void pedirPermiso() {
+                  Intent i = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                          Uri.parse("package:" + getPackageName()));
+                  startActivity(i);
+              }
+
+              private void abrir(String accion) {
+                  if (!Settings.canDrawOverlays(this)) {
+                      Toast.makeText(this, "Primero da el permiso de superposición", Toast.LENGTH_LONG).show();
+                      pedirPermiso();
+                      return;
+                  }
+                  Intent i = new Intent(this, FloatingService.class).setAction(accion);
+                  startForegroundService(i);
+              }
+
+              private void cerrarTodo() {
+                  Intent i = new Intent(this, FloatingService.class).setAction(FloatingService.ACCION_CERRAR);
+                  startService(i);
+              }
+
+              private void abrirOpcionesDesarrollador() {
+                  try {
+                      startActivity(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS));
+                  } catch (Exception e) {
+                      Toast.makeText(this,
+                              "Actívalas en Ajustes > Acerca del teléfono > toca 7 veces \"Número de compilación\"",
+                              Toast.LENGTH_LONG).show();
+                  }
+              }
+
+              private void elegirApp() {
+                  PackageManager pm = getPackageManager();
+                  Intent principal = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+                  List<ResolveInfo> lista = pm.queryIntentActivities(principal, 0);
+                  Collections.sort(lista, new ResolveInfo.DisplayNameComparator(pm));
+
+                  final List<String> paquetes = new ArrayList<>();
+                  final List<String> nombres = new ArrayList<>();
+                  for (ResolveInfo ri : lista) {
+                      if (ri.activityInfo.packageName.equals(getPackageName())) {
+                          continue;
+                      }
+                      paquetes.add(ri.activityInfo.packageName);
+                      nombres.add(String.valueOf(ri.loadLabel(pm)));
+                  }
+
+                  new AlertDialog.Builder(this)
+                          .setTitle("Elige la app")
+                          .setItems(nombres.toArray(new String[0]),
+                                  (dialogo, cual) -> abrirEnVentana(paquetes.get(cual)))
+                          .show();
+              }
+
+              private void abrirEnVentana(String paquete) {
+                  Intent i = getPackageManager().getLaunchIntentForPackage(paquete);
+                  if (i == null) {
+                      Toast.makeText(this, "No se pudo abrir esa app", Toast.LENGTH_SHORT).show();
+                      return;
+                  }
+                  i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+
+                  DisplayMetrics dm = getResources().getDisplayMetrics();
+                  Rect limites = new Rect(dm.widthPixels / 12, dm.heightPixels / 8,
+                          dm.widthPixels * 11 / 12, dm.heightPixels * 5 / 8);
+                  ActivityOptions opciones = ActivityOptions.makeBasic();
+                  opciones.setLaunchBounds(limites);
+                  try {
+                      // 5 = modo "ventana libre". Puede estar bloqueado por el sistema; si falla, no pasa nada.
+                      ActivityOptions.class.getMethod("setLaunchWindowingMode", int.class).invoke(opciones, 5);
+                  } catch (Throwable ignorada) {
+                      // se usa solo setLaunchBounds
+                  }
+
+                  try {
+                      startActivity(i, opciones.toBundle());
+                      Toast.makeText(this,
+                              "Si se abrió a pantalla completa, tu teléfono no tiene ventanas libres activadas",
+                              Toast.LENGTH_LONG).show();
+                  } catch (Exception e) {
+                      Toast.makeText(this, "No se pudo abrir: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                  }
+              }
+
+              // ---------------------------------------------------------------- utilidades de interfaz
+
+              private int dp(float valor) {
+                  return (int) (valor * getResources().getDisplayMetrics().density + 0.5f);
+              }
+
+              private TextView texto(String contenido, float sp, boolean negrita) {
+                  TextView t = new TextView(this);
+                  t.setText(contenido);
+                  t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+                  if (negrita) {
+                      t.setTypeface(t.getTypeface(), android.graphics.Typeface.BOLD);
+                  }
+                  return t;
+              }
+
+              private Button boton(String contenido, View.OnClickListener accion) {
+                  Button b = new Button(this);
+                  b.setText(contenido);
+                  b.setAllCaps(false);
+                  b.setOnClickListener(accion);
+                  return b;
+              }
+
+              private void agregar(LinearLayout col, View vista, int margenSuperiorDp) {
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  lp.topMargin = dp(margenSuperiorDp);
+                  col.addView(vista, lp);
+              }
+          }
+          FIN_DEL_ARCHIVO
+          mkdir -p app/src/main/java/com/flotante/app
+          cat > app/src/main/java/com/flotante/app/FloatingService.java <<'FIN_DEL_ARCHIVO'
+          package com.flotante.app;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.pm.ServiceInfo;
+          import android.graphics.PixelFormat;
+          import android.graphics.drawable.GradientDrawable;
+          import android.graphics.drawable.Icon;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.IBinder;
+          import android.provider.Settings;
+          import android.text.Editable;
+          import android.text.InputType;
+          import android.text.TextWatcher;
+          import android.util.DisplayMetrics;
+          import android.util.TypedValue;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.view.WindowManager;
+          import android.view.inputmethod.EditorInfo;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.util.ArrayList;
+          import java.util.List;
+
+          /**
+           * Servicio que dibuja ventanas flotantes (navegador y notas) encima de cualquier app.
+           * Cada ventana se puede mover (arrastrando la barra de arriba), cambiar de tamaño
+           * (arrastrando la barra de abajo), hacer transparente, minimizar y cerrar.
+           */
+          public class FloatingService extends Service {
+
+              public static final String ACCION_NAVEGADOR = "com.flotante.app.NAVEGADOR";
+              public static final String ACCION_NOTAS = "com.flotante.app.NOTAS";
+              public static final String ACCION_CERRAR = "com.flotante.app.CERRAR";
+
+              private static final String CANAL = "ventanas_flotantes";
+              private static final int ID_NOTIFICACION = 1;
+              private static final int MATCH = ViewGroup.LayoutParams.MATCH_PARENT;
+
+              private WindowManager wm;
+              private final List<Ventana> ventanas = new ArrayList<>();
+              private int creadas = 0;
+
+              @Override
+              public IBinder onBind(Intent intent) {
+                  return null;
+              }
+
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+                  wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+              }
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  iniciarPrimerPlano();
+                  String accion = intent != null ? intent.getAction() : null;
+
+                  if (ACCION_CERRAR.equals(accion)) {
+                      cerrarTodas();
+                      stopForeground(STOP_FOREGROUND_REMOVE);
+                      stopSelf();
+                      return START_NOT_STICKY;
+                  }
+                  if (ACCION_NAVEGADOR.equals(accion)) {
+                      crearVentana(true);
+                  } else if (ACCION_NOTAS.equals(accion)) {
+                      crearVentana(false);
+                  } else if (ventanas.isEmpty()) {
+                      stopForeground(STOP_FOREGROUND_REMOVE);
+                      stopSelf();
+                  }
+                  return START_NOT_STICKY;
+              }
+
+              @Override
+              public void onDestroy() {
+                  cerrarTodas();
+                  super.onDestroy();
+              }
+
+              // ---------------------------------------------------------------- notificación
+
+              private void iniciarPrimerPlano() {
+                  NotificationManager nm = getSystemService(NotificationManager.class);
+                  nm.createNotificationChannel(new NotificationChannel(
+                          CANAL, "Ventanas flotantes", NotificationManager.IMPORTANCE_LOW));
+
+                  Intent abrir = new Intent(this, MainActivity.class);
+                  PendingIntent piAbrir = PendingIntent.getActivity(this, 0, abrir,
+                          PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+
+                  Intent cerrar = new Intent(this, FloatingService.class).setAction(ACCION_CERRAR);
+                  PendingIntent piCerrar = PendingIntent.getService(this, 1, cerrar,
+                          PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+
+                  Notification.Action cerrarTodo = new Notification.Action.Builder(
+                          Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel),
+                          "Cerrar todo", piCerrar).build();
+
+                  Notification n = new Notification.Builder(this, CANAL)
+                          .setContentTitle("Ventanas flotantes activas")
+                          .setContentText("Toca para abrir la app")
+                          .setSmallIcon(android.R.drawable.ic_dia
